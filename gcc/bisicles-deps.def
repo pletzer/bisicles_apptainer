@@ -1,0 +1,246 @@
+Bootstrap: docker
+From: gcc:16.2.0-trixie
+
+# ---------------------------------------------------------------------------
+# Build environment for Chombo 3.2 + BISICLES
+#
+#   GCC 16.2 (official gcc image, compilers live in /usr/local)
+#   OpenMPI 5.0.11 (internal PMIx/PRRTE, UCX + libfabric transports)
+#   HDF5 1.14.6     serial   -> /opt/bisicles/hdf5/serial
+#                   parallel -> /opt/bisicles/hdf5/parallel
+#   netCDF-C 4.10.1 serial   -> /opt/bisicles/netcdf/serial
+#                   parallel -> /opt/bisicles/netcdf/parallel
+#   PETSc 3.26.1 + hypre + fblaslapack -> /opt/bisicles/petsc
+#   Python 3 (Debian) with headers + numpy for the BISICLES python interface
+#
+# Ready-made make configuration files:
+#   /opt/bisicles/etc/Make.defs.local  -> copy to $CHOMBO_HOME/mk/Make.defs.local
+#   /opt/bisicles/etc/Make.defs.none   -> copy to BISICLES/code/mk/Make.defs.none
+#
+# Build:  apptainer build --fakeroot bisicles-deps.sif bisicles-deps.def
+# ---------------------------------------------------------------------------
+
+%labels
+    Author alexander.pletzer@reannz.co.nz
+    Description Chombo/BISICLES dependencies: GCC 16.2, OpenMPI 5.0.11, HDF5 1.14.6, netCDF-C 4.10.1, PETSc 3.26.1
+    GCC 16.2.0
+    OpenMPI 5.0.11
+    HDF5 1.14.6
+    NetCDF 4.10.1
+    PETSc 3.26.1
+
+%environment
+    export BISICLES_DEPS=/opt/bisicles
+    export MPI_HOME=/opt/bisicles/openmpi
+    export HDF5_SERIAL_DIR=/opt/bisicles/hdf5/serial
+    export HDF5_PARALLEL_DIR=/opt/bisicles/hdf5/parallel
+    export NETCDF_SERIAL_DIR=/opt/bisicles/netcdf/serial
+    export NETCDF_PARALLEL_DIR=/opt/bisicles/netcdf/parallel
+    export PETSC_DIR=/opt/bisicles/petsc
+    export PETSC_ARCH=
+    export PATH=/opt/bisicles/openmpi/bin:/opt/bisicles/netcdf/parallel/bin:/opt/bisicles/hdf5/parallel/bin:/usr/local/bin:$PATH
+    export LD_LIBRARY_PATH=/opt/bisicles/openmpi/lib:/opt/bisicles/petsc/lib:/usr/local/lib64:$LD_LIBRARY_PATH
+    export CC=gcc CXX=g++ FC=gfortran
+    export OMPI_CC=gcc OMPI_CXX=g++ OMPI_FC=gfortran
+
+%post
+    set -eu
+    export DEBIAN_FRONTEND=noninteractive
+
+    # Versions ---------------------------------------------------------------
+    OMPI_VER=5.0.11
+    HDF5_VER=1.14.6
+    NETCDF_VER=4.10.1
+    PETSC_VER=3.26.1
+
+    PREFIX=/opt/bisicles
+    NPROC=${BUILD_JOBS:-$(nproc)}
+
+    # System packages (the GCC toolchain itself comes from the base image) ---
+    apt-get update
+    apt-get install -y --no-install-recommends \
+        ca-certificates wget curl git make cmake m4 perl file patch \
+        bzip2 xz-utils unzip pkg-config autoconf automake libtool \
+        zlib1g-dev libxml2-dev libzstd-dev libbz2-dev \
+        python3 python3-dev python3-numpy python-is-python3 \
+        libucx-dev libfabric-dev libnuma-dev \
+        libhwloc-dev libevent-dev \
+        csh procps less vim-tiny
+    apt-get clean
+    rm -rf /var/lib/apt/lists/*
+
+    # Make sure the GCC 16 toolchain from /usr/local is the one being used
+    export PATH=/usr/local/bin:$PATH
+    export CC=/usr/local/bin/gcc CXX=/usr/local/bin/g++ FC=/usr/local/bin/gfortran
+    gcc --version | head -1
+    gfortran --version | head -1
+
+    mkdir -p /opt/src $PREFIX/etc
+    cd /opt/src
+
+    # ---------------------------------------------------------------- OpenMPI
+    wget -q https://download.open-mpi.org/release/open-mpi/v${OMPI_VER%.*}/openmpi-${OMPI_VER}.tar.bz2
+    tar xjf openmpi-${OMPI_VER}.tar.bz2
+    cd openmpi-${OMPI_VER}
+    ./configure --prefix=$PREFIX/openmpi \
+        CC=$CC CXX=$CXX FC=$FC \
+        --with-pmix=internal --with-prrte=internal \
+        --with-hwloc=external --with-libevent=external \
+        --with-ucx=/usr --with-ucx-libdir=/usr/lib/x86_64-linux-gnu \
+        --with-ofi=/usr --with-ofi-libdir=/usr/lib/x86_64-linux-gnu \
+        --enable-mpi-fortran=all \
+        --disable-static
+    make -j$NPROC
+    make install
+    cd /opt/src && rm -rf openmpi-${OMPI_VER}*
+
+    export PATH=$PREFIX/openmpi/bin:$PATH
+    export LD_LIBRARY_PATH=$PREFIX/openmpi/lib
+    export OMPI_CC=$CC OMPI_CXX=$CXX OMPI_FC=$FC
+    mpicc --version | head -1
+
+    # ------------------------------------------------------------------- HDF5
+    wget -q https://github.com/HDFGroup/hdf5/releases/download/hdf5_${HDF5_VER}/hdf5-${HDF5_VER}.tar.gz
+    # serial
+    tar xzf hdf5-${HDF5_VER}.tar.gz && mv hdf5-${HDF5_VER} hdf5-serial
+    cd hdf5-serial
+    CC=$CC CXX=$CXX FC=$FC CFLAGS="-O2 -fPIC" CXXFLAGS="-O2 -fPIC" FCFLAGS="-O2 -fPIC" \
+        ./configure --prefix=$PREFIX/hdf5/serial \
+        --enable-cxx --enable-fortran --enable-hl --with-zlib=/usr \
+        --enable-build-mode=production
+    make -j$NPROC
+    make install
+    cd /opt/src && rm -rf hdf5-serial
+    # parallel
+    tar xzf hdf5-${HDF5_VER}.tar.gz && mv hdf5-${HDF5_VER} hdf5-parallel
+    cd hdf5-parallel
+    CC=mpicc FC=mpifort CFLAGS="-O2 -fPIC" FCFLAGS="-O2 -fPIC" \
+        ./configure --prefix=$PREFIX/hdf5/parallel \
+        --enable-parallel --enable-fortran --enable-hl --with-zlib=/usr \
+        --enable-build-mode=production
+    make -j$NPROC
+    make install
+    cd /opt/src && rm -rf hdf5-parallel hdf5-${HDF5_VER}.tar.gz
+
+    # ----------------------------------------------------------------- netCDF
+    wget -q https://downloads.unidata.ucar.edu/netcdf-c/${NETCDF_VER}/netcdf-c-${NETCDF_VER}.tar.gz
+    NC_OPTS="--enable-netcdf-4 --disable-dap --disable-byterange --disable-plugins \
+             --disable-libxml2 --disable-testsets --enable-shared"
+    # serial (linked against serial HDF5)
+    tar xzf netcdf-c-${NETCDF_VER}.tar.gz && mv netcdf-c-${NETCDF_VER} netcdf-serial
+    cd netcdf-serial
+    CC=$CC CFLAGS="-O2 -fPIC" \
+        CPPFLAGS="-I$PREFIX/hdf5/serial/include" \
+        LDFLAGS="-L$PREFIX/hdf5/serial/lib -Wl,-rpath,$PREFIX/hdf5/serial/lib" \
+        ./configure --prefix=$PREFIX/netcdf/serial $NC_OPTS
+    make -j$NPROC
+    make install
+    cd /opt/src && rm -rf netcdf-serial
+    # parallel (linked against parallel HDF5)
+    tar xzf netcdf-c-${NETCDF_VER}.tar.gz && mv netcdf-c-${NETCDF_VER} netcdf-parallel
+    cd netcdf-parallel
+    CC=mpicc CFLAGS="-O2 -fPIC" \
+        CPPFLAGS="-I$PREFIX/hdf5/parallel/include" \
+        LDFLAGS="-L$PREFIX/hdf5/parallel/lib -Wl,-rpath,$PREFIX/hdf5/parallel/lib" \
+        ./configure --prefix=$PREFIX/netcdf/parallel $NC_OPTS
+    make -j$NPROC
+    make install
+    cd /opt/src && rm -rf netcdf-parallel netcdf-c-${NETCDF_VER}.tar.gz
+
+    # ------------------------------------------------------------------ PETSc
+    wget -q https://web.cels.anl.gov/projects/petsc/download/release-snapshots/petsc-${PETSC_VER}.tar.gz
+    tar xzf petsc-${PETSC_VER}.tar.gz
+    cd petsc-${PETSC_VER}
+    unset PETSC_DIR PETSC_ARCH
+    python3 ./configure --prefix=$PREFIX/petsc \
+        --with-cc=mpicc --with-cxx=mpicxx --with-fc=mpifort \
+        --with-mpi=1 --with-debugging=0 --with-shared-libraries=1 \
+        --with-cxx-dialect=C++17 --with-c2html=0 --with-x=0 --with-ssl=0 \
+        --download-fblaslapack=1 --download-hypre=1 \
+        COPTFLAGS="-O2" CXXOPTFLAGS="-O2" FOPTFLAGS="-O2"
+    make PETSC_DIR=/opt/src/petsc-${PETSC_VER} PETSC_ARCH=arch-linux-c-opt MAKE_NP=$NPROC all
+    make PETSC_DIR=/opt/src/petsc-${PETSC_VER} PETSC_ARCH=arch-linux-c-opt install
+    cd /opt/src && rm -rf petsc-${PETSC_VER}*
+
+    # ------------------------------------------ Chombo / BISICLES make configs
+    cat > $PREFIX/etc/Make.defs.local << 'EOF'
+# Chombo Make.defs.local for the bisicles-deps container.
+# Copy to $CHOMBO_HOME/mk/Make.defs.local  (CHOMBO_HOME = .../Chombo/lib)
+makefiles+=Make.defs.local
+
+PRECISION     = DOUBLE
+CXX           = g++
+FC            = gfortran
+MPICXX        = mpicxx
+USE_64        = TRUE
+USE_HDF       = TRUE
+
+BISICLES_DEPS ?= /opt/bisicles
+HDF_SER_DIR    = $(BISICLES_DEPS)/hdf5/serial
+HDF_PAR_DIR    = $(BISICLES_DEPS)/hdf5/parallel
+# Chombo uses the HDF5 1.10 API; HDF5 1.14 provides it via H5_USE_110_API
+HDFINCFLAGS    = -I$(HDF_SER_DIR)/include -DH5_USE_110_API
+HDFLIBFLAGS    = -L$(HDF_SER_DIR)/lib -lhdf5 -Wl,-rpath=$(HDF_SER_DIR)/lib -lz
+HDFMPIINCFLAGS = -I$(HDF_PAR_DIR)/include -DH5_USE_110_API
+HDFMPILIBFLAGS = -L$(HDF_PAR_DIR)/lib -lhdf5 -Wl,-rpath=$(HDF_PAR_DIR)/lib -lz
+
+cxxdbgflags   = -g -fPIC
+cxxoptflags   = -fPIC -O2
+fdbgflags     = -g -fPIC -fallow-argument-mismatch
+foptflags     = -fPIC -O3 -funroll-loops -fallow-argument-mismatch
+syslibflags   = -Wl,-rpath=/usr/local/lib64
+EOF
+
+    cat > $PREFIX/etc/Make.defs.none << 'EOF'
+# BISICLES host defs for the bisicles-deps container.
+# Copy to BISICLES/code/mk/Make.defs.none
+BISICLES_DEPS ?= /opt/bisicles
+
+PYTHON_INC  = $(shell python3-config --includes)
+PYTHON_LIBS = $(shell python3-config --embed --ldflags)
+
+# netCDF must be linked against the same HDF5 flavour as Chombo
+ifeq ($(MPI),TRUE)
+NC_CONFIG = $(BISICLES_DEPS)/netcdf/parallel/bin/nc-config
+HDF_NC_DIR = $(BISICLES_DEPS)/hdf5/parallel
+else
+NC_CONFIG = $(BISICLES_DEPS)/netcdf/serial/bin/nc-config
+HDF_NC_DIR = $(BISICLES_DEPS)/hdf5/serial
+endif
+NETCDF_HOME = $(shell $(NC_CONFIG) --prefix)
+NETCDF_INC  = -I$(shell $(NC_CONFIG) --includedir)
+NETCDF_LIBS = -L$(NETCDF_HOME)/lib -lnetcdf -Wl,-rpath,$(NETCDF_HOME)/lib \
+              -L$(HDF_NC_DIR)/lib -lhdf5_hl -lhdf5 -Wl,-rpath,$(HDF_NC_DIR)/lib
+EOF
+
+    rm -rf /opt/src
+
+%test
+    set -e
+    export PATH=/opt/bisicles/openmpi/bin:/usr/local/bin:$PATH
+    gcc --version | head -1
+    mpicc --showme:version
+    /opt/bisicles/hdf5/serial/bin/h5cc -showconfig | grep -E 'HDF5 Version|Parallel HDF5'
+    /opt/bisicles/hdf5/parallel/bin/h5pcc -showconfig | grep -E 'HDF5 Version|Parallel HDF5'
+    /opt/bisicles/netcdf/serial/bin/nc-config --version
+    /opt/bisicles/netcdf/parallel/bin/nc-config --has-parallel4
+    test -f /opt/bisicles/petsc/lib/petsc/conf/variables
+    grep -q 'PETSC_HAVE_HYPRE 1' /opt/bisicles/petsc/include/petscconf.h && echo "PETSc: hypre enabled"
+    python3 -c 'import numpy; print("numpy", numpy.__version__)'
+
+%help
+    Build environment for Chombo 3.2 and BISICLES (GCC 16.2 + OpenMPI 5.0.11,
+    HDF5 1.14.6, netCDF-C 4.10.1, PETSc 3.26.1 with hypre).
+
+    Typical use, with Chombo and BISICLES checked out under $BISICLES_HOME:
+
+      apptainer shell -B $BISICLES_HOME bisicles-deps.sif
+      cp /opt/bisicles/etc/Make.defs.local $CHOMBO_HOME/mk/
+      cp /opt/bisicles/etc/Make.defs.none  $BISICLES_HOME/BISICLES/code/mk/
+      cd $BISICLES_HOME/BISICLES/code/exec2D
+      make all OPT=TRUE MPI=TRUE USE_PETSC=TRUE CHOMBO_HOME=$CHOMBO_HOME
+
+    Running in parallel on a cluster (hybrid model, host launches ranks):
+      srun --mpi=pmix apptainer exec bisicles-deps.sif ./driver2d...MPI.ex inputs
+    or within one node:
+      apptainer exec bisicles-deps.sif mpirun -np 8 ./driver2d...MPI.ex inputs

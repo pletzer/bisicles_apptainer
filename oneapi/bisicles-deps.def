@@ -1,0 +1,265 @@
+Bootstrap: docker
+From: ubuntu:24.04
+
+# ---------------------------------------------------------------------------
+# Build environment for Chombo 3.2 + BISICLES, Intel oneAPI flavour
+#
+#   Intel oneAPI 2026.2 compilers (icx / icpx / ifx)
+#   Intel MPI 2021.19 (mpiicx / mpiicpx / mpiifx)
+#   Intel MKL 2026.2 (BLAS/LAPACK for PETSc)
+#   HDF5 1.14.6     serial   -> /opt/bisicles/hdf5/serial
+#                   parallel -> /opt/bisicles/hdf5/parallel
+#   netCDF-C 4.10.1 serial   -> /opt/bisicles/netcdf/serial
+#                   parallel -> /opt/bisicles/netcdf/parallel
+#   PETSc 3.26.1 + hypre (MKL BLAS/LAPACK) -> /opt/bisicles/petsc
+#   Python 3 (Ubuntu) with headers + numpy for the BISICLES python interface
+#
+# Ready-made make configuration files:
+#   /opt/bisicles/etc/Make.defs.local  -> copy to $CHOMBO_HOME/mk/Make.defs.local
+#   /opt/bisicles/etc/Make.defs.none   -> copy to BISICLES/code/mk/Make.defs.none
+#
+# Build:  apptainer build --fakeroot bisicles-deps.sif bisicles-deps.def
+# ---------------------------------------------------------------------------
+
+%labels
+    Author alexander.pletzer@reannz.co.nz
+    Description Chombo/BISICLES dependencies: oneAPI 2026.2, Intel MPI 2021.19, MKL, HDF5 1.14.6, netCDF-C 4.10.1, PETSc 3.26.1
+    oneAPI 2026.2
+    IntelMPI 2021.19
+    HDF5 1.14.6
+    NetCDF 4.10.1
+    PETSc 3.26.1
+
+%environment
+    # oneAPI environment captured from setvars.sh at build time
+    . /opt/intel/oneapi-env.sh
+    export BISICLES_DEPS=/opt/bisicles
+    export HDF5_SERIAL_DIR=/opt/bisicles/hdf5/serial
+    export HDF5_PARALLEL_DIR=/opt/bisicles/hdf5/parallel
+    export NETCDF_SERIAL_DIR=/opt/bisicles/netcdf/serial
+    export NETCDF_PARALLEL_DIR=/opt/bisicles/netcdf/parallel
+    export PETSC_DIR=/opt/bisicles/petsc
+    export PETSC_ARCH=
+    export PATH=/opt/bisicles/netcdf/parallel/bin:/opt/bisicles/hdf5/parallel/bin:$PATH
+    export LD_LIBRARY_PATH=/opt/bisicles/petsc/lib:$LD_LIBRARY_PATH
+    export CC=icx CXX=icpx FC=ifx
+    export MPICC=mpiicx MPICXX=mpiicpx MPIFC=mpiifx
+    # make plain mpicc/mpicxx/mpif90 use the Intel compilers too
+    export I_MPI_CC=icx I_MPI_CXX=icpx I_MPI_FC=ifx I_MPI_F90=ifx
+
+%post
+    set -eu
+    export DEBIAN_FRONTEND=noninteractive
+
+    # Versions ---------------------------------------------------------------
+    ONEAPI_VER=2026.2
+    IMPI_VER=2021.19
+    HDF5_VER=1.14.6
+    NETCDF_VER=4.10.1
+    PETSC_VER=3.26.1
+
+    PREFIX=/opt/bisicles
+    NPROC=${BUILD_JOBS:-$(nproc)}
+
+    # System packages. icx/icpx need the GNU headers, libstdc++ and binutils.
+    apt-get update
+    apt-get install -y --no-install-recommends \
+        ca-certificates gnupg wget curl git make cmake m4 perl file patch \
+        bzip2 xz-utils unzip pkg-config autoconf automake libtool \
+        build-essential g++ cpp \
+        zlib1g-dev libxml2-dev libzstd-dev libbz2-dev \
+        python3 python3-dev python3-numpy python-is-python3 \
+        libnuma1 csh procps less vim-tiny rsync bc \
+        libibverbs1 ibverbs-providers rdma-core libucx0 ucx-utils librdmacm1
+
+    # Intel oneAPI apt repository
+    wget -qO- https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB \
+        | gpg --dearmor > /usr/share/keyrings/oneapi-archive-keyring.gpg
+    echo "deb [signed-by=/usr/share/keyrings/oneapi-archive-keyring.gpg] https://apt.repos.intel.com/oneapi all main" \
+        > /etc/apt/sources.list.d/oneAPI.list
+    apt-get update
+    apt-get install -y --no-install-recommends \
+        intel-oneapi-compiler-dpcpp-cpp-${ONEAPI_VER} \
+        intel-oneapi-compiler-fortran-${ONEAPI_VER} \
+        intel-oneapi-mpi-devel-${IMPI_VER} \
+        intel-oneapi-mkl-classic-devel-${ONEAPI_VER}
+    apt-get clean
+    rm -rf /var/lib/apt/lists/*
+
+    # Capture the oneAPI environment once, so the runscript/%environment
+    # (which is sourced by /bin/sh) does not have to run setvars.sh
+    bash -c 'source /opt/intel/oneapi/setvars.sh --force > /dev/null
+      for v in PATH LD_LIBRARY_PATH LIBRARY_PATH CPATH PKG_CONFIG_PATH CMAKE_PREFIX_PATH \
+               MANPATH NLSPATH ONEAPI_ROOT CMPLR_ROOT MKLROOT I_MPI_ROOT FI_PROVIDER_PATH \
+               TBBROOT OCL_ICD_FILENAMES CLASSPATH; do
+        [ -n "${!v:-}" ] && echo "export $v=\"${!v}\""
+      done' > /opt/intel/oneapi-env.sh
+    . /opt/intel/oneapi-env.sh
+
+    export CC=icx CXX=icpx FC=ifx
+    export I_MPI_CC=icx I_MPI_CXX=icpx I_MPI_FC=ifx I_MPI_F90=ifx
+    icx --version | head -1
+    ifx --version | head -1
+    mpiicx --version | head -1
+    mpirun --version | head -1
+
+    mkdir -p /opt/src $PREFIX/etc
+    cd /opt/src
+
+    # ------------------------------------------------------------------- HDF5
+    wget -q https://github.com/HDFGroup/hdf5/releases/download/hdf5_${HDF5_VER}/hdf5-${HDF5_VER}.tar.gz
+    # serial
+    tar xzf hdf5-${HDF5_VER}.tar.gz && mv hdf5-${HDF5_VER} hdf5-serial
+    cd hdf5-serial
+    CC=icx CXX=icpx FC=ifx CFLAGS="-O2 -fPIC" CXXFLAGS="-O2 -fPIC" FCFLAGS="-O2 -fPIC" \
+        ./configure --prefix=$PREFIX/hdf5/serial \
+        --enable-cxx --enable-fortran --enable-hl --with-zlib=/usr \
+        --enable-build-mode=production
+    make -j$NPROC
+    make install
+    cd /opt/src && rm -rf hdf5-serial
+    # parallel
+    tar xzf hdf5-${HDF5_VER}.tar.gz && mv hdf5-${HDF5_VER} hdf5-parallel
+    cd hdf5-parallel
+    CC=mpiicx FC=mpiifx CFLAGS="-O2 -fPIC" FCFLAGS="-O2 -fPIC" \
+        ./configure --prefix=$PREFIX/hdf5/parallel \
+        --enable-parallel --enable-fortran --enable-hl --with-zlib=/usr \
+        --enable-build-mode=production
+    make -j$NPROC
+    make install
+    cd /opt/src && rm -rf hdf5-parallel hdf5-${HDF5_VER}.tar.gz
+
+    # ----------------------------------------------------------------- netCDF
+    wget -q https://downloads.unidata.ucar.edu/netcdf-c/${NETCDF_VER}/netcdf-c-${NETCDF_VER}.tar.gz
+    NC_OPTS="--enable-netcdf-4 --disable-dap --disable-byterange --disable-plugins \
+             --disable-libxml2 --disable-testsets --enable-shared"
+    # serial (linked against serial HDF5)
+    tar xzf netcdf-c-${NETCDF_VER}.tar.gz && mv netcdf-c-${NETCDF_VER} netcdf-serial
+    cd netcdf-serial
+    CC=icx CFLAGS="-O2 -fPIC" \
+        CPPFLAGS="-I$PREFIX/hdf5/serial/include" \
+        LDFLAGS="-L$PREFIX/hdf5/serial/lib -Wl,-rpath,$PREFIX/hdf5/serial/lib" \
+        ./configure --prefix=$PREFIX/netcdf/serial $NC_OPTS
+    make -j$NPROC
+    make install
+    cd /opt/src && rm -rf netcdf-serial
+    # parallel (linked against parallel HDF5). configure's link test for
+    # MPI_Comm_f2c/MPI_Info_f2c fails with mpiicx although Intel MPI provides
+    # both, so preseed the results.
+    tar xzf netcdf-c-${NETCDF_VER}.tar.gz && mv netcdf-c-${NETCDF_VER} netcdf-parallel
+    cd netcdf-parallel
+    ac_cv_func_MPI_Comm_f2c=yes ac_cv_func_MPI_Info_f2c=yes \
+    CC=mpiicx CFLAGS="-O2 -fPIC" \
+        CPPFLAGS="-I$PREFIX/hdf5/parallel/include" \
+        LDFLAGS="-L$PREFIX/hdf5/parallel/lib -Wl,-rpath,$PREFIX/hdf5/parallel/lib" \
+        ./configure --prefix=$PREFIX/netcdf/parallel $NC_OPTS
+    make -j$NPROC
+    make install
+    cd /opt/src && rm -rf netcdf-parallel netcdf-c-${NETCDF_VER}.tar.gz
+
+    # ------------------------------------------------------------------ PETSc
+    wget -q https://web.cels.anl.gov/projects/petsc/download/release-snapshots/petsc-${PETSC_VER}.tar.gz
+    tar xzf petsc-${PETSC_VER}.tar.gz
+    cd petsc-${PETSC_VER}
+    unset PETSC_DIR PETSC_ARCH
+    python3 ./configure --prefix=$PREFIX/petsc \
+        --with-cc=mpiicx --with-cxx=mpiicpx --with-fc=mpiifx \
+        --with-mpi=1 --with-debugging=0 --with-shared-libraries=1 \
+        --with-cxx-dialect=C++17 --with-c2html=0 --with-x=0 --with-ssl=0 \
+        --with-blaslapack-dir=$MKLROOT --download-hypre=1 \
+        COPTFLAGS="-O2" CXXOPTFLAGS="-O2" FOPTFLAGS="-O2"
+    make PETSC_DIR=/opt/src/petsc-${PETSC_VER} PETSC_ARCH=arch-linux-c-opt MAKE_NP=$NPROC all
+    make PETSC_DIR=/opt/src/petsc-${PETSC_VER} PETSC_ARCH=arch-linux-c-opt install
+    cd /opt/src && rm -rf petsc-${PETSC_VER}*
+
+    # ------------------------------------------ Chombo / BISICLES make configs
+    # Chombo 3.2 only recognises the classic icpc, so everything that
+    # mk/compiler/Make.defs.Intel would normally provide is set here.
+    cat > $PREFIX/etc/Make.defs.local << 'EOF'
+# Chombo Make.defs.local for the bisicles-deps (Intel oneAPI) container.
+# Copy to $CHOMBO_HOME/mk/Make.defs.local  (CHOMBO_HOME = .../Chombo/lib)
+makefiles+=Make.defs.local
+
+PRECISION     = DOUBLE
+CXX           = icpx
+FC            = ifx
+MPICXX        = mpiicpx
+USE_64        = TRUE
+USE_HDF       = TRUE
+
+BISICLES_DEPS ?= /opt/bisicles
+HDF_SER_DIR    = $(BISICLES_DEPS)/hdf5/serial
+HDF_PAR_DIR    = $(BISICLES_DEPS)/hdf5/parallel
+# Chombo uses the HDF5 1.10 API; HDF5 1.14 provides it via H5_USE_110_API
+HDFINCFLAGS    = -I$(HDF_SER_DIR)/include -DH5_USE_110_API
+HDFLIBFLAGS    = -L$(HDF_SER_DIR)/lib -lhdf5 -Wl,-rpath=$(HDF_SER_DIR)/lib -lz
+HDFMPIINCFLAGS = -I$(HDF_PAR_DIR)/include -DH5_USE_110_API
+HDFMPILIBFLAGS = -L$(HDF_PAR_DIR)/lib -lhdf5 -Wl,-rpath=$(HDF_PAR_DIR)/lib -lz
+
+# Fortran is preprocessed with the GNU cpp, as in the GNU configuration
+CH_CPP        = cpp -E -P
+# C++11: Chombo's IntVect.H specialises std::less<IntVect>::operator() without
+# constexpr, which clang-based icpx rejects for C++14 and later
+cxxcomflags   = -std=c++11 -Wno-unknown-pragmas
+cxxdbgflags   = -g -fPIC
+cxxoptflags   = -fPIC -O2
+fcomflags     =
+fdbgflags     = -g -fPIC
+foptflags     = -fPIC -O3
+# Fortran runtime needed when linking with icpx
+flibflags     = -lifport -lifcore -limf -lsvml -lirc -lm
+EOF
+
+    cat > $PREFIX/etc/Make.defs.none << 'EOF'
+# BISICLES host defs for the bisicles-deps container.
+# Copy to BISICLES/code/mk/Make.defs.none
+BISICLES_DEPS ?= /opt/bisicles
+
+PYTHON_INC  = $(shell python3-config --includes)
+PYTHON_LIBS = $(shell python3-config --embed --ldflags)
+
+# netCDF must be linked against the same HDF5 flavour as Chombo
+ifeq ($(MPI),TRUE)
+NC_CONFIG = $(BISICLES_DEPS)/netcdf/parallel/bin/nc-config
+HDF_NC_DIR = $(BISICLES_DEPS)/hdf5/parallel
+else
+NC_CONFIG = $(BISICLES_DEPS)/netcdf/serial/bin/nc-config
+HDF_NC_DIR = $(BISICLES_DEPS)/hdf5/serial
+endif
+NETCDF_HOME = $(shell $(NC_CONFIG) --prefix)
+NETCDF_INC  = -I$(shell $(NC_CONFIG) --includedir)
+NETCDF_LIBS = -L$(NETCDF_HOME)/lib -lnetcdf -Wl,-rpath,$(NETCDF_HOME)/lib \
+              -L$(HDF_NC_DIR)/lib -lhdf5_hl -lhdf5 -Wl,-rpath,$(HDF_NC_DIR)/lib
+EOF
+
+    rm -rf /opt/src
+
+%test
+    set -e
+    . /opt/intel/oneapi-env.sh
+    icpx --version | head -1
+    ifx --version | head -1
+    mpirun --version | head -1
+    /opt/bisicles/hdf5/serial/bin/h5cc -showconfig | grep -E 'HDF5 Version|Parallel HDF5'
+    /opt/bisicles/hdf5/parallel/bin/h5pcc -showconfig | grep -E 'HDF5 Version|Parallel HDF5'
+    /opt/bisicles/netcdf/serial/bin/nc-config --version
+    /opt/bisicles/netcdf/parallel/bin/nc-config --has-parallel4
+    test -f /opt/bisicles/petsc/lib/petsc/conf/variables
+    grep -q 'PETSC_HAVE_HYPRE 1' /opt/bisicles/petsc/include/petscconf.h && echo "PETSc: hypre enabled"
+    grep -q 'PETSC_HAVE_MKL' /opt/bisicles/petsc/include/petscconf.h && echo "PETSc: MKL BLAS/LAPACK"
+    python3 -c 'import numpy; print("numpy", numpy.__version__)'
+
+%help
+    Build environment for Chombo 3.2 and BISICLES (Intel oneAPI 2026.2, Intel MPI
+    2021.19, MKL, HDF5 1.14.6, netCDF-C 4.10.1, PETSc 3.26.1 with hypre).
+
+    Typical use, with Chombo and BISICLES checked out under $BISICLES_HOME:
+
+      apptainer shell -B $BISICLES_HOME bisicles-deps.sif
+      cp /opt/bisicles/etc/Make.defs.local $CHOMBO_HOME/mk/
+      cp /opt/bisicles/etc/Make.defs.none  $BISICLES_HOME/BISICLES/code/mk/
+      cd $BISICLES_HOME/BISICLES/code/exec2D
+      make all OPT=TRUE MPI=TRUE USE_PETSC=TRUE CHOMBO_HOME=$CHOMBO_HOME
+
+    Within one node:
+      apptainer exec bisicles-deps.sif mpirun -np 8 ./driver2d...MPI.ex inputs
