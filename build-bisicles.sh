@@ -45,6 +45,10 @@ rsync -a --delete "$SRC_DIR/Chombo-3.2/" "$WORK_DIR/Chombo/"
 rsync -a --delete "$SRC_DIR/BISICLES/" "$WORK_DIR/BISICLES/"
 
 MKOPTS="OPT=TRUE MPI=TRUE USE_PETSC=TRUE BISICLES_HOME=$WORK_DIR CHOMBO_HOME=$WORK_DIR/Chombo/lib"
+# BISICLES' make runs svnversion/svn info only to embed a version string. Fix the
+# values so the build does not depend on .svn (an unversioned copy gives
+# "Unversioned directory", which breaks make's quoting and can hang the build).
+MKOPTS="$MKOPTS SVN_REV=unknown SVN_REP=unknown SVN_URL=unknown"
 # User flags override Chombo's opt flags (make command-line variables win over
 # Make.defs.local). %q keeps flags containing spaces as single make arguments.
 [ -z "${CXXFLAGS:-}" ] || MKOPTS="$MKOPTS $(printf 'cxxoptflags=%q' "$CXXFLAGS")"
