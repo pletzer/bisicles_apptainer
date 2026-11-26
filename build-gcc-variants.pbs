@@ -1,0 +1,33 @@
+#!/bin/bash
+#PBS -N bisicles-gccvar-build
+#PBS -J 0-4
+#PBS -l select=1:ncpus=16:mem=32gb
+#PBS -l walltime=01:00:00
+#PBS -j oe
+#PBS -o build-gccvar-cascade.log
+# --- site specific: uncomment/adjust for Cascade ---------------------------
+##PBS -P <project>
+##PBS -q workq                       # default queue; shortq/longq also exist
+##PBS -l storage=<filesystems>        # only if the site requires it
+
+# PBS equivalent of build-gcc-variants.sl: build driver2d for each
+# gcc flag variant on Cascade, znver4 (one array subjob each; -J is PBS Pro/OpenPBS syntax, for
+# Torque use "#PBS -t 0-4"). Executable + flags.txt go to gcc/<variant>/.
+# Submit from the repo root:  qsub build-gcc-variants.pbs
+# apptainer is on the default PATH on Cascade login/compute nodes (spack, 1.3.6).
+set -e
+cd "${PBS_O_WORKDIR:?}"
+source ./gcc-variants.sh
+IDX=${PBS_ARRAY_INDEX:-${PBS_ARRAYID:-0}}
+V=${VARIANTS[$IDX]}
+export JOBS=${NCPUS:-16}
+export WORK_DIR=$PBS_O_WORKDIR/build-work/gcc-$V
+export BIN_DIR=$PBS_O_WORKDIR/gcc/$V
+[ -z "${CXXF[$V]}" ] && unset CXXFLAGS || export CXXFLAGS="${CXXF[$V]}"
+[ -z "${FCF[$V]}" ]  && unset FCFLAGS  || export FCFLAGS="${FCF[$V]}"
+echo "Host: $(hostname)  variant: $V  start: $(date)"
+t0=$(date +%s)
+./build-bisicles.sh gcc
+echo "build time: $(( $(date +%s) - t0 )) s" | tee -a "$BIN_DIR/flags.txt"
+rm -rf "$WORK_DIR"
+cat "$BIN_DIR/flags.txt"; ls -l "$BIN_DIR"
