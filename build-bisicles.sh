@@ -6,6 +6,7 @@
 #        SRC_DIR   directory holding BISICLES/ and Chombo-3.2/ (default: ..)
 #        SIF       container image (default: $SRC_DIR/sifs/PLATFORM/bisicles-deps.sif)
 #        WORK_DIR  scratch build directory (default: ./build-work/PLATFORM)
+#        BIN_DIR   where the executable and flags.txt go (default: ./PLATFORM/bin)
 #        CXXFLAGS  C++ optimisation flags; replaces the container default
 #                  (cxxoptflags = -fPIC -O2), so keep -fPIC
 #        FCFLAGS   Fortran optimisation flags; replaces the container default
@@ -27,7 +28,7 @@ SRC_DIR=$(realpath "${SRC_DIR:-$HERE/..}")
 SIF=$(realpath "${SIF:-$SRC_DIR/sifs/$PLATFORM/bisicles-deps.sif}")
 JOBS=${JOBS:-16}
 WORK_DIR=${WORK_DIR:-$HERE/build-work/$PLATFORM}
-BIN_DIR=$HERE/$PLATFORM/bin
+BIN_DIR=${BIN_DIR:-$HERE/$PLATFORM/bin}
 
 for p in "$SIF" "$SRC_DIR/BISICLES" "$SRC_DIR/Chombo-3.2"; do
   [ -e "$p" ] || { echo "missing: $p" >&2; exit 1; }
@@ -68,5 +69,10 @@ $RUN bash -c "set -e
 
 EXE=$(ls -t "$WORK_DIR"/BISICLES/code/exec2D/driver2d.Linux.64.*OPT.MPI*.ex | head -1)
 cp -f "$EXE" "$BIN_DIR/"
+{ echo "platform: $PLATFORM"
+  echo "CXXFLAGS: ${CXXFLAGS:-<container default: cxxoptflags = -fPIC -O2>}"
+  echo "FCFLAGS:  ${FCFLAGS:-<container default: foptflags = -fPIC -O3 -funroll-loops -fallow-argument-mismatch>}"
+  echo "make (driver):  make all $MKOPTS"
+} > "$BIN_DIR/flags.txt"
 ln -sf "$(basename "$EXE")" "$BIN_DIR/driver2d"
 echo "=== built: $BIN_DIR/$(basename "$EXE")  (symlink: $BIN_DIR/driver2d)"
