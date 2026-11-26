@@ -6,6 +6,13 @@
 #        SRC_DIR   directory holding BISICLES/ and Chombo-3.2/ (default: ..)
 #        SIF       container image (default: $SRC_DIR/sifs/PLATFORM/bisicles-deps.sif)
 #        WORK_DIR  scratch build directory (default: ./build-work/PLATFORM)
+#        CXXFLAGS  C++ optimisation flags; replaces the container default
+#                  (cxxoptflags = -fPIC -O2), so keep -fPIC
+#        FCFLAGS   Fortran optimisation flags; replaces the container default
+#                  (gcc:    foptflags = -fPIC -O3 -funroll-loops -fallow-argument-mismatch,
+#                   oneapi: foptflags = -fPIC -O3)
+#        Example: CXXFLAGS="-fPIC -O3 -march=native" FCFLAGS="-fPIC -O3 -march=native" \
+#                   ./build-bisicles.sh gcc
 # Output: PLATFORM/bin/driver2d (plus the original-named executable)
 set -euo pipefail
 
@@ -37,9 +44,14 @@ rsync -a --delete "$SRC_DIR/Chombo-3.2/" "$WORK_DIR/Chombo/"
 rsync -a --delete "$SRC_DIR/BISICLES/" "$WORK_DIR/BISICLES/"
 
 MKOPTS="OPT=TRUE MPI=TRUE USE_PETSC=TRUE BISICLES_HOME=$WORK_DIR CHOMBO_HOME=$WORK_DIR/Chombo/lib"
+# User flags override Chombo's opt flags (make command-line variables win over
+# Make.defs.local). %q keeps flags containing spaces as single make arguments.
+[ -z "${CXXFLAGS:-}" ] || MKOPTS="$MKOPTS $(printf 'cxxoptflags=%q' "$CXXFLAGS")"
+[ -z "${FCFLAGS:-}" ] || MKOPTS="$MKOPTS $(printf 'foptflags=%q' "$FCFLAGS")"
 LOG=$WORK_DIR/build-bisicles.log
 
 echo "=== building ($PLATFORM, -j$JOBS), log: $LOG"
+echo "    CXXFLAGS=${CXXFLAGS:-<container default>}  FCFLAGS=${FCFLAGS:-<container default>}"
 # The exec2D 'all' target is not parallel-make safe, so build in stages:
 # Chombo libs (-j), libBisicles (-j), driver (serial). The Chombo lib targets
 # are named explicitly to skip 'include', whose cp -p fails on ACL filesystems.
