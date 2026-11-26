@@ -6,7 +6,7 @@
 #PBS -j oe
 #PBS -o build-gccvar-cascade.log
 # --- site specific: uncomment/adjust for Cascade ---------------------------
-##PBS -P <project>
+#PBS -P reannz40001
 ##PBS -q workq                       # default queue; shortq/longq also exist
 ##PBS -l storage=<filesystems>        # only if the site requires it
 
